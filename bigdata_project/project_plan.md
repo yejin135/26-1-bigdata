@@ -41,17 +41,17 @@
 
 ---
  
-## 핵심 목표 및 기대효과
-- **위험도 지수(Index) 개발:** 전세가율과 보증사고율을 결합하여 서울시 25개 구별 임차인 위험도 점수 산출
-- **회귀 모델링(XGBoost) 적용:** 어떤 요인이 전세 위험도 점수에 가장 지대한 영향을 미치는지 '변수 중요도(Feature Importance)'를 수학적으로 도출하고 단기 위험 구역 예측
-- **Folium GIS 시각화:** 서울시 구 단위 경계 데이터(GeoJSON)와 연동하여 고위험 구역을 붉은색 등으로 표현한 Choropleth 지도 시각화 결과물 구현
+## 핵심 목표 및 기대효과 (MVP 기준 정의)
+- **1_EDA.py (1차 작업):** pandas를 활용하여 서울시 25개 구 데이터 요약, 결측치 처리 및 전세가율 기본 분포 확인
+- **2_시각화.py (2차 작업):** `Plotly`를 이용하여 전세가율과 보증사고율 간의 상관관계 및 인사이트를 보여주는 인터랙티브 그래프 구현 (2개 이상)
+- **3_모델_서비스.py (3차 작업):** `scikit-learn (Random Forest)` 기반 회귀 모델을 탑재하여, 사용자가 구를 입력하면 단기 위험도 예측 결과를 Folium Choropleth 지도와 함께 화면에 표출하는 MVP(최소 기능 제품) 서비스 완성
 
 ## 사용 기술 스택
  
 | 단계 | 기술 | 비고 |
 | :--- | :--- | :--- |
-| **데이터 수집** | pandas | API 무사용, 다운로드 기반 CSV 로드 |
-| **전처리/지수화** | pandas, numpy | 구(District) 단위 텍스트 매칭 및 가중합 연산 |
-| **시각화** | matplotlib, seaborn | 변수 간 상관관계 Heatmap 및 분포 시각화 |
-| **머신러닝 모델링** | scikit-learn, xgboost | XGBoost 기반 회귀 분석 (변수 중요도 도출) |
-| **지도 시각화** | Folium, GeoPandas | 서울시 구 단위 Choropleth 지도 구현 |
+| **웹 프레임워크** | Streamlit | 싱글 구동 웹 애플리케이션 및 멀티페이지 구조 적용 |
+| **데이터 적재** | pandas, numpy | `src/data_loader.py` 내 `@st.cache_data` 적용으로 최적화 |
+| **시각화 (EDA)** | Plotly, Streamlit web | 인터랙티브 그래프(인사이트 도출용 2개 이상) 구현 |
+| **머신러닝 모델링** | scikit-learn (Random Forest) | 가이드 권장 합격 경로인 정형 데이터 회귀 분석 알고리즘 적용 |
+| **지도 시각화** | Folium, streamlit-folium | 서울시 구 단위 경계(GeoJSON) Choropleth 구현 및 앱 연동 |
