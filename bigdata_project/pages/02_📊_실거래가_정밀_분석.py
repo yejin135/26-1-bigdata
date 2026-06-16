@@ -1,137 +1,316 @@
-import streamlit as st
-import plotly.express as px
-import pandas as pd
-from src.features import load_and_process_real_estate
+"""
+pages/02_📊_실거래가_정밀_분석.py
+──────────────────────────────────────────────────────────
+[화면 3] 실거래가 정밀 분석
+- 전세가율이 높으면 진짜로 사고가 터지는가?
+- 통계학적으로 완벽하게 인과관계를 입증하는 핵심 화면
+  · 상관분석 (피어슨 r)
+  · 산점도 + 회귀선
+  · 집단 비교 (80% 이상 vs 미만) → 독립표본 t-검정
+  · 박스플롯
+  · 전세가율 구간별 평균 보증사고 건수
+──────────────────────────────────────────────────────────
+"""
 
-# 1. 페이지 기본 설정 및 브라우저 탭 데코레이션
-st.set_page_config(
-    page_title="서울시 빌라 전세사기 위험도 대시보드",
-    page_icon="🚨",
-    layout="wide"
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent / "src"))
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from scipy import stats
+
+from utils import (
+    load_data, render_sidebar_info,
+    COL_DATE, COL_DISTRICT, COL_RATE,
+    COL_ACC_CNT, COL_ACC_AMT, COL_RATE_CHG,
+    COL_ACC_RATE, COL_VOL_GAP, GRADE_COLOR
 )
 
-# 2. 사이드바 내부 추가 정돈
-with st.sidebar:
-    st.markdown("### ⚙️ 분석 시스템 안내")
-    st.caption("본 대시보드는 국토교통부 실거래가 17만 건을 실시간으로 추적하는 정밀 분석 시스템입니다.")
-    st.markdown("---")
-    st.markdown("📅 **데이터 기준:** 2025년 전체 계약분")
+# ─────────────────────────────────────────
+# 0. 페이지 설정
+# ─────────────────────────────────────────
+st.set_page_config(
+    page_title="실거래가 정밀 분석",
+    page_icon="📊",
+    layout="wide",
+)
 
-# 3. 메인 화면 상단 프리미엄 배너 
-st.markdown("""
-    <div style="background-color:#F8F9FA; padding:22px; border-radius:12px; border-left: 6px solid #FF4B4B; margin-bottom: 25px;">
-        <h1 style="margin:0; color:#31333F; font-size:26px; font-weight:700;">🚨 서울시 연립다세대 전세 사기 위험도 정밀 분석</h1>
-        <p style="margin:6px 0 0 0; color:#555555; font-size:14px;">국토교통부 대용량 로우 데이터를 기반으로 행정동별 <b>깡통전세 위험 지수(Risk Score)</b>를 실시간 연산합니다.</p>
-    </div>
-""", unsafe_allow_html=True)
+df = load_data()
+render_sidebar_info(df)
 
-# 4. 데이터 로드 및 로딩바 정돈
-@st.cache_data
-def get_processed_data():
-    return load_and_process_real_estate()
+# ─────────────────────────────────────────
+# 1. 헤더
+# ─────────────────────────────────────────
+st.title("📊 실거래가 정밀 분석")
+st.markdown(
+    "**전세가율이 높으면 실제로 보증사고가 더 많이 터지는가?**\n\n"
+    "통계적 검정을 통해 전세가율과 HUG 보증사고의 인과관계를 학술적으로 입증합니다."
+)
+st.divider()
 
-with st.status("⚙️ 대용량 엔진 가공 중...", expanded=False) as status:
-    try:
-        df = get_processed_data()
-        status.update(label="✅ 빅데이터 연산 및 분석 엔진 로드 완료", state="complete", expanded=False)
-    except Exception as e:
-        st.error(f"데이터 로드 실패: {e}")
-        st.stop()
+# ─────────────────────────────────────────
+# 분석용 데이터 준비
+# ─────────────────────────────────────────
+# 보증사고율이 있으면 함께 포함 (t-검정용)
+cols_for_analysis = [COL_DATE, COL_DISTRICT, COL_RATE, COL_ACC_CNT]
+if COL_ACC_RATE in df.columns:
+    cols_for_analysis.append(COL_ACC_RATE)
+analysis_df = df[cols_for_analysis].dropna(subset=[COL_DATE, COL_DISTRICT, COL_RATE, COL_ACC_CNT]).copy()
+# 보증사고율 결측은 0으로 (사고 없는 달)
+if COL_ACC_RATE in analysis_df.columns:
+    analysis_df[COL_ACC_RATE] = analysis_df[COL_ACC_RATE].fillna(0)
 
-# 5. 핵심 지표 요약 
-st.markdown("### 📌 핵심 관리 지표")
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.container(border=True).metric(
-        label="🎯 총 분석 관측치", 
-        value=f"{len(df):,} 개", 
-        help="구-동-연월 조건이 매칭된 총 결합 데이터 수"
+# 데이터가 부족하면 경고 후 중단
+if len(analysis_df) < 2:
+    n = len(analysis_df)
+    st.error(
+        f"분석 가능한 데이터가 부족합니다 (현재 {n}행). "
+        "데이터_병합.py -> 데이터_전처리.py 순서로 실행한 뒤 앱을 재시작하세요."
     )
-with col2:
-    mean_val = df['전세가율'].mean()
-    st.container(border=True).metric(
-        label="📈 서울시 평균 전세가율", 
-        value=f"{mean_val:.1f}%",
-        delta=f"{mean_val - 80:.1f}%" if mean_val > 80 else f"{mean_val - 80:.1f}%",
-        delta_color="inverse"
+    st.stop()
+
+analysis_df["위험구분"] = analysis_df[COL_RATE].apply(
+    lambda x: "위험 (≥80%)" if x >= 80 else "비위험 (<80%)"
+)
+analysis_df["전세가율_구간"] = pd.cut(
+    analysis_df[COL_RATE],
+    bins=[0, 60, 70, 75, 80, 85, 90, 200],
+    labels=["~60%", "60~70%", "70~75%", "75~80%", "80~85%", "85~90%", "90%~"],
+    right=False,
+)
+
+# ═══════════════════════════════════════════
+# [섹션 1] 상관분석 결과 KPI
+# ═══════════════════════════════════════════
+st.subheader("🔬 상관분석: 전세가율 ↔ 보증사고 건수")
+
+r_val, p_val = stats.pearsonr(analysis_df[COL_RATE], analysis_df[COL_ACC_CNT])
+r2_val = r_val ** 2
+
+# 해석 텍스트
+if abs(r_val) >= 0.7:
+    strength = "강한"
+elif abs(r_val) >= 0.4:
+    strength = "중간"
+else:
+    strength = "약한"
+direction = "양의" if r_val > 0 else "음의"
+
+kpi1, kpi2, kpi3 = st.columns(3)
+with kpi1:
+    st.metric(
+        label="📐 피어슨 상관계수 (r)",
+        value=f"{r_val:.4f}",
+        help="−1 ~ +1 범위. |r| ≥ 0.7이면 강한 상관"
     )
-with col3:
-    st.container(border=True).metric(
-        label="🔥 최고 위험지역 점수", 
-        value=f"{df['위험점수'].max():.1f} 점"
+with kpi2:
+    st.metric(
+        label="📐 결정계수 (R²)",
+        value=f"{r2_val:.4f}",
+        help="전세가율이 보증사고 건수 분산의 몇 %를 설명하는가"
     )
-with col4:
-    danger_count = len(df[df['위험점수'] >= 80])
-    st.container(border=True).metric(
-        label="🚨 위험 관리 동(Dong) 수", 
-        value=f"{danger_count} 개 지역",
-        help="위험 점수가 학계 기준인 80점 이상을 초과한 지역 수"
+with kpi3:
+    p_display = f"{p_val:.6f}" if p_val >= 0.0001 else "< 0.0001"
+    significance = "✅ 통계적으로 유의함" if p_val < 0.05 else "❌ 통계적으로 유의하지 않음"
+    st.metric(
+        label="📐 p-value",
+        value=p_display,
+        help="p < 0.05이면 우연이 아닌 실제 관계가 있다고 판단"
     )
 
-st.markdown("")
-
-# 6. 메인 콘텐츠를 '탭(Tabs)' 구조로 분리하여 시각적 피로도 감소 
-tab1, tab2 = st.tabs(["🔥 위험 지역 Top 10 시각화", "🔍 우리 동네 트렌드 검색기"])
-
-with tab1:
-    st.markdown("#### 📊 전세 사기 위험도 상위 10개 행정동")
-    df['지역명'] = df['구'] + " " + df['동']
-    top_10 = df.groupby('지역명')['위험점수'].mean().sort_values(ascending=False).head(10).reset_index()
-    
-    # 깔끔한 테마의 Plotly 차트
-    fig_bar = px.bar(
-        top_10, 
-        x='위험점수', 
-        y='지역명', 
-        orientation='h',
-        color='위험점수', 
-        color_continuous_scale='Reds',
-        labels={'위험점수': '위험 점수', '지역명': '행정동명'},
-        template="plotly_white"
+# 해석 박스
+if p_val < 0.05:
+    st.success(
+        f"✅ **통계적으로 유의한 {direction} {strength} 상관관계** (r = {r_val:.3f}, p < 0.05)\n\n"
+        f"전세가율은 보증사고 건수 분산의 **{r2_val*100:.1f}%** 를 설명합니다. "
+        f"전세가율이 높아질수록 보증사고 건수도 유의미하게 증가하는 경향이 있습니다."
     )
-    fig_bar.update_layout(
-        yaxis={'categoryorder':'total ascending'}, 
-        showlegend=False,
-        margin=dict(l=10, r=10, t=10, b=10)
+else:
+    st.warning(
+        f"⚠️ 통계적으로 유의하지 않습니다 (r = {r_val:.3f}, p = {p_val:.4f}). "
+        "데이터 수가 충분한지 확인이 필요합니다."
     )
-    st.plotly_chart(fig_bar, use_container_width=True)
 
-with tab2:
-    st.markdown("#### 📍 지역별 전세가율 시계열 추이 상세 검색")
-    c1, c2 = st.columns(2)
-    with c1:
-        gu_list = sorted(df['구'].unique())
-        selected_gu = st.selectbox("분석할 '구' 선택", gu_list)
-    with c2:
-        dong_list = sorted(df[df['구'] == selected_gu]['동'].unique())
-        selected_dong = st.selectbox("분석할 '동' 선택", dong_list)
-        
-    dong_df = df[(df['구'] == selected_gu) & (df['동'] == selected_dong)].sort_values(by='계약년월')
-    dong_df['계약년월'] = dong_df['계약년월'].astype(str)
+st.divider()
 
-    if not dong_df.empty:
-        fig_line = px.line(
-            dong_df, 
-            x='계약년월', 
-            y='전세가율', 
-            markers=True,
-            text=dong_df['전세가율'].round(1),
-            labels={'전세가율': '전세가율 (%)', '계약년월': '계약 연월'},
-            template="plotly_white"
+# ═══════════════════════════════════════════
+# [섹션 2] 산점도 + 회귀선
+# ═══════════════════════════════════════════
+st.subheader("🔵 산점도 분석: 전세가율 vs 보증사고 건수")
+
+fig_scatter = px.scatter(
+    analysis_df,
+    x=COL_RATE,
+    y=COL_ACC_CNT,
+    color="위험구분",
+    color_discrete_map={"위험 (≥80%)": "#FF4444", "비위험 (<80%)": "#2196F3"},
+    hover_data=[COL_DISTRICT, COL_DATE],
+    trendline="ols",          # 최소자승 회귀선
+    trendline_scope="overall",
+    title="전세가율 vs 보증사고 건수 (전체 기간)",
+    labels={COL_RATE: "전세가율 (%)", COL_ACC_CNT: "보증사고 건수"},
+    opacity=0.6,
+)
+fig_scatter.add_vline(
+    x=80, line_dash="dash", line_color="red",
+    annotation_text="⚠️ 위험선 80%"
+)
+fig_scatter.update_layout(height=500)
+st.plotly_chart(fig_scatter, use_container_width=True)
+
+st.divider()
+
+# ═══════════════════════════════════════════
+# [섹션 3] 독립표본 t-검정 (80% 이상 vs 미만)
+# ═══════════════════════════════════════════
+st.subheader("📐 집단 비교: 전세가율 80% 이상 vs 미만 (독립표본 t-검정)")
+st.caption(
+    "전세가율 80% 이상인 집단과 미만인 집단의 보증사고율(%)을 비교합니다. "
+    "보증사고 건수는 구마다 규모 차이가 있어 왜곡될 수 있으므로 "
+    "구 규모를 통제한 보증사고율(%)로 비교합니다."
+)
+
+# 보증사고율 컬럼이 없으면 보증사고건수로 대체
+t_col    = COL_ACC_RATE if COL_ACC_RATE in analysis_df.columns else COL_ACC_CNT
+t_label  = "보증사고율(%)" if t_col == COL_ACC_RATE else "보증사고 건수"
+
+danger_group = analysis_df[analysis_df[COL_RATE] >= 80][t_col]
+safe_group   = analysis_df[analysis_df[COL_RATE] < 80][t_col]
+
+t_stat, t_pval = stats.ttest_ind(danger_group, safe_group, equal_var=False)  # Welch's t-test
+
+col_t1, col_t2 = st.columns(2)
+
+with col_t1:
+    fig_box = px.box(
+        analysis_df,
+        x="위험구분",
+        y=t_col,
+        color="위험구분",
+        color_discrete_map={"위험 (≥80%)": "#FF4444", "비위험 (<80%)": "#2196F3"},
+        points="outliers",
+        title=f"위험 구분별 {t_label} 분포",
+        labels={t_col: t_label, "위험구분": ""},
+    )
+    fig_box.update_layout(showlegend=False, height=400)
+    st.plotly_chart(fig_box, use_container_width=True)
+
+with col_t2:
+    st.markdown("#### 📋 t-검정 결과")
+    result_data = {
+        "구분": ["위험 (전세가율 ≥ 80%)", "비위험 (전세가율 < 80%)"],
+        "표본 수": [len(danger_group), len(safe_group)],
+        f"평균 {t_label}": [round(danger_group.mean(), 3), round(safe_group.mean(), 3)],
+        "표준편차": [round(danger_group.std(), 3), round(safe_group.std(), 3)],
+    }
+    st.dataframe(pd.DataFrame(result_data), hide_index=True, use_container_width=True)
+
+    p_display  = f"{t_pval:.6f}" if t_pval >= 0.0001 else "< 0.0001"
+    t_conclude = "✅ 유의한 차이 있음" if t_pval < 0.05 else "❌ 유의한 차이 없음"
+
+    st.markdown(f"""
+    | 통계량 | 값 |
+    |--------|-----|
+    | t-통계량 | {t_stat:.4f} |
+    | p-value | {p_display} |
+    | 유의수준 | α = 0.05 |
+    | 결론 | {t_conclude} |
+    """)
+
+    if t_pval < 0.05:
+        diff = danger_group.mean() - safe_group.mean()
+        st.success(
+            f"전세가율 80% 이상인 구의 평균 {t_label}은 미만인 구보다 "
+            f"**{diff:.3f}%p 더 높으며**, 이 차이는 통계적으로 유의합니다 (p < 0.05)."
+            + "  \n→ **전세가율 80%는 보증사고율이 유의미하게 높아지는 실질적 임계점**임이 입증되었습니다."
         )
-        # 붉은색 경계 점선 추가
-        fig_line.add_hline(y=80, line_dash="dash", line_color="#FF4B4B", annotation_text="깡통전세 위험선 (80%)")
-        fig_line.update_traces(textposition="top center", line_color="#1F77B4")
-        st.plotly_chart(fig_line, use_container_width=True)
     else:
-        st.warning("선택하신 동은 분석 가능한 충분한 쌍(매매+전세) 데이터가 존재하지 않습니다.")
+        st.warning(f"두 집단의 {t_label} 평균 차이가 통계적으로 유의하지 않습니다.")
 
-# 7. 하단 로우 데이터는 접이식 창(Expander)으로 숨겨서 깔끔하게 정돈
-st.markdown("---")
-with st.expander("📋 정밀 전처리 완료된 5,000건의 데이터셋 원본 보기"):
-    display_df = df[['구', '동', '계약년월', '평균매매가', '평균전세가', '전세가율', '위험점수']].copy()
-    display_df['평균매매가'] = display_df['평균매매가'].apply(lambda x: f"{int(x):,} 만원")
-    display_df['평균전세가'] = display_df['평균전세가'].apply(lambda x: f"{int(x):,} 만원")
-    display_df['전세가율'] = display_df['전세가율'].round(1).astype(str) + " %"
-    st.dataframe(display_df, use_container_width=True)
+st.divider()
+
+# ═══════════════════════════════════════════
+# [섹션 4] 전세가율 구간별 평균 보증사고율
+# ═══════════════════════════════════════════
+st.subheader("📊 전세가율 구간별 평균 보증사고율")
+st.caption("전세가율 구간이 높아질수록 보증사고율이 어떻게 변하는지 확인합니다.")
+
+agg_col   = COL_ACC_RATE if COL_ACC_RATE in analysis_df.columns else COL_ACC_CNT
+agg_label = "평균_보증사고율(%)" if agg_col == COL_ACC_RATE else "평균_보증사고건수"
+
+interval_agg = (
+    analysis_df.groupby("전세가율_구간", observed=True)[agg_col]
+    .agg(["mean", "count"])
+    .reset_index()
+    .rename(columns={"mean": agg_label, "count": "데이터수"})
+)
+
+fig_interval = px.bar(
+    interval_agg,
+    x="전세가율_구간",
+    y=agg_label,
+    text=agg_label,
+    color=agg_label,
+    color_continuous_scale=["#44BB44", "#FFF176", "#FF4444"],
+    title=f"전세가율 구간별 {agg_label}",
+    labels={"전세가율_구간": "전세가율 구간", agg_label: agg_label},
+)
+fig_interval.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+fig_interval.update_layout(height=400, coloraxis_showscale=False)
+st.plotly_chart(fig_interval, use_container_width=True)
+
+st.divider()
+
+# ═══════════════════════════════════════════
+# [섹션 5] 시차 분석 (전세가율이 사고를 선행하는가?)
+# ═══════════════════════════════════════════
+st.subheader("⏱️ 시차 분석: 전세가율 상승 → 보증사고 선행 확인")
+st.caption(
+    "이번 달 전세가율이 다음 달 보증사고를 예측할 수 있는지 확인합니다. "
+    "(lag=1: 1개월 시차, lag=2: 2개월 시차)"
+)
+
+col_lag1, col_lag2 = st.columns([1, 2])
+
+with col_lag1:
+    lag_results = []
+    for lag in range(0, 7):
+        temp = df[[COL_DATE, COL_DISTRICT, COL_RATE, COL_ACC_CNT]].copy()
+        temp["사고_lag"] = temp.groupby(COL_DISTRICT)[COL_ACC_CNT].shift(-lag)
+        temp = temp.dropna()
+        if len(temp) > 10:
+            r, p = stats.pearsonr(temp[COL_RATE], temp["사고_lag"])
+            lag_results.append({
+                "시차 (개월)": lag,
+                "상관계수 r": round(r, 4),
+                "p-value": round(p, 6),
+                "유의성": "✅" if p < 0.05 else "❌",
+            })
+    lag_df = pd.DataFrame(lag_results)
+    st.dataframe(lag_df, hide_index=True, use_container_width=True)
+
+with col_lag2:
+    fig_lag = px.line(
+        lag_df,
+        x="시차 (개월)",
+        y="상관계수 r",
+        markers=True,
+        title="시차별 전세가율-보증사고 상관계수",
+        color_discrete_sequence=["#2196F3"],
+    )
+    fig_lag.add_hline(y=0, line_color="gray", line_dash="dot")
+    fig_lag.update_layout(height=350)
+    st.plotly_chart(fig_lag, use_container_width=True)
+
+# 시차 해석
+best_lag = lag_df.loc[lag_df["상관계수 r"].abs().idxmax()]
+st.info(
+    f"**시차 {int(best_lag['시차 (개월)'])}개월**에서 상관계수가 가장 높습니다 "
+    f"(r = {best_lag['상관계수 r']:.4f}). "
+    f"이는 현재 전세가율이 {int(best_lag['시차 (개월)'])}개월 후 보증사고를 "
+    f"가장 잘 예측함을 의미합니다."
+)
